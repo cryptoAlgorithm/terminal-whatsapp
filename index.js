@@ -7,7 +7,7 @@ const { parsePhoneNumber } = require('libphonenumber-js');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 require('colors');
 
-const LOAD_BLOCKS = 25;
+const LOAD_BLOCKS = 50;
 
 // Create a screen object.
 const screen = blessed.screen({
@@ -40,20 +40,24 @@ const getTextFromMsg = msg => {
     const msgType = Object.keys(msg)[0];
     switch (msgType) {
         case MessageType.text: return msg.conversation;
-        case MessageType.extendedText: return msg.extendedTextMessage.text;
+        case MessageType.extendedText: return msg.extendedTextMessage.text.replace(/@[0-9]+/gm, v => {
+            const wID = v.slice(1) + '@s.whatsapp.net';
+            return `{grey-fg}@{/}{bold}{#42a5f5-fg}${conn.contacts[wID]?.name || parseWAIDToNumber(wID)}{/}`;
+        });
         case MessageType.image: return `<${'imageMessage'.blue}> ` + msg.imageMessage.caption;
         case 'buttonsResponseMessage':
             return `<${'buttonResponse'.blue}> [${msg.buttonsResponseMessage.selectedButtonId.green}] ` +
                 `${msg.buttonsResponseMessage.selectedDisplayText.bgGreen.black.bold}`
         case MessageType.buttonsMessage:
             return `<${'buttonMessage'.blue}>
-                ${msg.buttonsMessage.contentText}
-                {#757575-fg}${msg.buttonsMessage.footerText}{/}
-                ${msg.buttonsMessage.buttons.map(v => v.buttonText.displayText.bgGreen.black.bold).join(' | '.bold.dim)}`
+      ${msg.buttonsMessage.contentText}
+      {#757575-fg}${msg.buttonsMessage.footerText}{/}
+      ${msg.buttonsMessage.buttons.map(v => v.buttonText.displayText.bgGreen.black.bold).join(' | '.bold.dim)}`
         default: return `{#b71c1c-fg}Message type ${msgType} is not implemented yet{/}`;
     }
 }
 
+// ====== UI Element Objects ====== //
 const chatsList = blessed.list({
     top: 0,
     left: 0,
@@ -136,44 +140,6 @@ const inputButton = blessed.button({
         focus: { border: {fg: 'blue'}, bg: '#333333' },
     }
 });
-const promptDialog = blessed.box({
-    top: 'center',
-    left: 'center',
-    width: 50,
-    height: 6,
-    tags: true,
-    shadow: true,
-    border: {type: 'line'},
-    hidden: true,
-    style: {
-        bg: '#004d40',
-        border: { fg: '#f0f0f0' },
-    }
-});
-const promptInput = blessed.textbox({
-    top: 3,
-    left: 0,
-    width: '100%-2',
-    height: 1,
-    parent: promptDialog,
-    inputOnFocus: true,
-    style: { bg: '#333333' }
-});
-const promptClose = blessed.button({
-    left: '50%+22',
-    top: '50%-3',
-    width: 3,
-    height: 3,
-    content: '✕',
-    mouse: true,
-    hidden: true,
-    border: { type: 'line' },
-    style: {
-        bg: '#d32f2f',
-        hover: { bg: '#b71c1c' },
-        border: { fg: '#f0f0f0' }
-    }
-});
 
 const oneTimeToken = require('./process_auth')();
 
@@ -186,8 +152,6 @@ const initUI = () => {
     screen.append(msgList);
     screen.append(loadMoreBox);
     screen.append(inputButton);
-    screen.append(promptDialog);
-    screen.append(promptClose);
 
     chatsList.focus();
     // Render the screen.
@@ -195,23 +159,26 @@ const initUI = () => {
 }
 
 // ====== UI Utility Functions ====== //
-const appendToMsgList = (messages, useShift = false) => {
+const appendToMsgList = (messages, useShift = false, addDate = true) => {
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
-        if (!msg.message) continue;
+        if (!msg.message) return;
 
-        const messageQuote = msg.message.extendedTextMessage?.contextInfo;
+        const messageQuote = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
         const sender = msg.participant || msg.key?.remoteJid;
+        const isDifferentDay = messages.length > 1 && ((i === 0 && addDate)
+            || format(messages[i - 1].messageTimestamp.low * 1000, 'yyyyDDD') !== format(msg.messageTimestamp.low * 1000, 'yyyyDDD'));
 
-        const txt = `{grey-fg}${format(msg.messageTimestamp.low * 1000, 'dd MMM yy HH:mm')}{/} ` +
+        const txt = (isDifferentDay ? `      {#a0a0a0-fg}{bold}——— ${format(msg.messageTimestamp.low * 1000, 'do MMMM yyyy')} ———{/}\n` : '')
+            + `{grey-fg}${format(msg.messageTimestamp.low * 1000, 'HH:mm')}{/} ` +
             (msg.key.fromMe ? 'You'.bold.red
                 : (conn.contacts[sender]?.name?.bold.green
                     ?? conn.contacts[sender]?.notify?.bold.blue
                     ?? sender?.bold.blue.dim)) + (messageQuote ? '' : ':') + ' ' +
             (messageQuote
-                    ? '\n                {#757575-fg}▐{/} {#bdbdbd-fg}'
-                    + getTextFromMsg(messageQuote?.quotedMessage).replace('\n', ' ')
-                    + '{/}\n                ' : ''
+                    ? '\n     {#757575-fg}▎{/}{#bdbdbd-fg}'
+                    + getTextFromMsg(messageQuote).replace('\n', ' ')
+                    + '{/}\n      ' : ''
             )
             + getTextFromMsg(msg.message)
 
@@ -219,24 +186,59 @@ const appendToMsgList = (messages, useShift = false) => {
     }
 }
 const prompt = (title, cb) => {
+    const promptDialog = blessed.box({
+        top: 'center',
+        left: 'center',
+        width: 50,
+        height: 6,
+        tags: true,
+        shadow: true,
+        border: {type: 'line'},
+        style: {
+            bg: '#004d40',
+            border: { fg: '#f0f0f0' },
+        }
+    });
+    const promptInput = blessed.textbox({
+        top: 3,
+        left: 0,
+        width: '100%-2',
+        height: 1,
+        parent: promptDialog,
+        inputOnFocus: true,
+        style: { bg: '#333333' }
+    });
+    const promptClose = blessed.button({
+        left: '50%+22',
+        top: '50%-3',
+        width: 3,
+        height: 3,
+        content: '✕',
+        mouse: true,
+        border: { type: 'line' },
+        style: {
+            bg: '#d32f2f',
+            hover: { bg: '#b71c1c' },
+            border: { fg: '#f0f0f0' }
+        }
+    });
+
     screen.saveFocus();
-    promptClose.show();
-    promptDialog.show();
     promptDialog.setContent(`\n  {bold}${title}{/}`);
 
     const close = () => {
-        promptClose.removeListener('press', close);
-        promptInput.clearValue();
-        promptDialog.hide();
-        promptClose.hide();
+        screen.remove(promptDialog);
+        screen.remove(promptClose);
+        screen.remove(promptInput);
         screen.restoreFocus();
         screen.render();
     }
     const subListener = () => {
-        promptInput.removeListener('submit', subListener);
         cb(promptInput.value);
         close();
     }
+    screen.append(promptDialog);
+    screen.append(promptClose);
     promptInput.on('submit', subListener);
     promptClose.on('press', close);
     promptInput.focus();
@@ -245,7 +247,11 @@ const prompt = (title, cb) => {
 
 
 // Parsing/updating functions
-const parseWAIDToNumber = id => parsePhoneNumber('+' + id.match(/[0-9]+/)[0]).formatInternational();
+const parseWAIDToNumber = id => {
+    try {
+        return id === conn.user.jid ? conn.user.name : parsePhoneNumber('+' + id.match(/[0-9]+/)[0]).formatInternational();
+    } catch { return id }
+}
 const updateChatsList = () => chatsList.setItems(conn.chats.all().map(c => c.name ?? parseWAIDToNumber(c.jid)));
 
 
@@ -324,13 +330,6 @@ const main = async () => {
         prompt('Type a message', v => {
             if (v.trim().length === 0) return;
             conn.sendMessage(selectedID, v.trim(), MessageType.text);
-            appendToMsgList([{
-                messageTimestamp: { low: (+new Date()) / 1000 },
-                key: { fromMe: true },
-                participant: conn.user.jid,
-                message: {conversation: v.trim()}
-            }]);
-            msgList.setScrollPerc(100);
         });
     });
 
@@ -372,10 +371,10 @@ const main = async () => {
     conn.on('chat-update', update => {
         updateChatsList();
 
-        if (update.messages && update.count && selectedID) {
+        if (update.messages && (update.count || update.hasNewMessage) && selectedID) {
             const isAtBottom = msgList.getScrollPerc() === 100;
             update.messages.all().forEach(v => {
-                if (v.message && v.key.remoteJid === selectedID) appendToMsgList([v]);
+                if (v.message && v.key.remoteJid === selectedID) appendToMsgList([v], false, false);
             });
             if (isAtBottom) msgList.setScrollPerc(100); // Scroll to bottom when new message received
         }
@@ -385,6 +384,7 @@ const main = async () => {
         const authInfo = conn.base64EncodedAuthInfo() // get all the auth info we need to restore this session
         const auth = JSON.stringify(authInfo, null, '\t')
         fs.writeFileSync('./auth_info.json', auth) // save this info to a file
+        if (process.argv.includes('-no-process-auth')) return;
         fetch(oneTimeToken, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -402,6 +402,10 @@ const main = async () => {
         screen.render();
     });
 
+    conn.on('close', ({reason, isReconnecting}) => {
+        // Handle close here
+    });
+
     try {conn.loadAuthInfo ('./auth_info.json')} catch {}
     await conn.connect();
 }
@@ -411,7 +415,7 @@ const versionCheck = () => {
     const major = parseInt(process.version.match(/v([0-9]+)/)[1]);
     if (major < 14) {
         console.error(`NodeJS version ${process.version} is too old. Download a version of NodeJS >= v14.0.0 from https://nodejs.org/en/download/current/`)
-        if (process.argv[2] === '-ignore-version-check') console.warn('Ignoring version check, run at your own risk!');
+        if (process.argv.includes('-ignore-version-check')) console.warn('Ignoring version check, run at your own risk!');
         else {
             console.warn("Run with -ignore-version-check to ignore this check, but don't say I didn't warn you!");
             process.exit(1);
