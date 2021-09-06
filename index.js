@@ -162,7 +162,7 @@ const initUI = () => {
 const appendToMsgList = (messages, useShift = false, addDate = true) => {
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
-        if (!msg.message) return;
+        if (!msg.message) continue;
 
         const messageQuote = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
         const sender = msg.participant || msg.key?.remoteJid;

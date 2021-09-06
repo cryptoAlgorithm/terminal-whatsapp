@@ -1,3 +1,8 @@
+// Do some math
+Math.sin(Math.PI) // Sine of PI - 0
+Math.round(1.5) // Returns 2
+Math.random() // A random decimal value between 0 and 1
+
 // instantiate
 /*const table = new Table({
     head: ['Chat Name', 'Chat JID'],
