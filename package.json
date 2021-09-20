@@ -10,6 +10,6 @@
   },
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "start": "node ./index.js"
+    "start": "node ./index.js "
   }
 }
